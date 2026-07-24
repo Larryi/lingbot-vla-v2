@@ -259,9 +259,22 @@ class FeatureTransform:
 
                                 if 'start' in org_info:
                                     org_info['target_key'] = target_feature
-                                    org_info['target_start'] = target_start_id
-                                    org_info['target_end'] = target_start_id+org_info['end']-org_info['start']
-                                    target_start_id =  org_info['target_end']
+                                    source_dim = org_info['end'] - org_info['start']
+                                    explicit_target_start = org_info.get('target_start', None)
+                                    if explicit_target_start is None:
+                                        org_info['target_start'] = target_start_id
+                                    else:
+                                        org_info['target_start'] = int(explicit_target_start)
+                                    org_info['target_end'] = int(org_info.get('target_end', org_info['target_start'] + source_dim))
+                                    if org_info['target_end'] - org_info['target_start'] != source_dim:
+                                        raise ValueError(
+                                            f"Invalid target span for {target_feature}: "
+                                            f"source_dim={source_dim}, target_start={org_info['target_start']}, "
+                                            f"target_end={org_info['target_end']}"
+                                        )
+                                    target_start_id = max(target_start_id, org_info['target_end'])
+                                    info['target_start'] = org_info['target_start']
+                                    info['target_end'] = org_info['target_end']
                                 else:
                                     org_info['target_key'] = target_feature
                                 reverse_convert_features[org_key].append(org_info)
@@ -312,16 +325,34 @@ class FeatureTransform:
 
             assert isinstance(convert_info['origin_keys'], OrderedDict)
             concat_list = []
+            sparse_target = None
             convert_success = True
+            has_explicit_target_span = any(
+                'target_start' in origin_info for origin_info in convert_info['origin_keys'].values()
+            )
             for origin_key, origin_info in convert_info['origin_keys'].items():
                 origin_key = origin_key.split('*')[0]
                 if origin_key not in item:
                     convert_success = False
                     break
                 origin_data = item.get(origin_key)[..., origin_info['start']:origin_info['end']]
-                concat_list.append(origin_data)
+                if has_explicit_target_span:
+                    if sparse_target is None:
+                        base_name = target_key.split('action.')[-1].split('observation.state.')[-1]
+                        target_dim = self.feature_config.joints_max_dim[base_name]
+                        sparse_target = torch.zeros(
+                            *origin_data.shape[:-1],
+                            target_dim,
+                            dtype=origin_data.dtype,
+                            device=origin_data.device,
+                        )
+                    target_start = int(origin_info['target_start'])
+                    target_end = int(origin_info['target_end'])
+                    sparse_target[..., target_start:target_end] = origin_data
+                else:
+                    concat_list.append(origin_data)
             if convert_success:
-                out_item[target_key] = torch.cat(concat_list, dim=-1)
+                out_item[target_key] = sparse_target if has_explicit_target_span else torch.cat(concat_list, dim=-1)
             del concat_list
 
         for feature in self.feature_to_keep:
