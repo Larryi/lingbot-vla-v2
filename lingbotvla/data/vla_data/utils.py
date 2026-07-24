@@ -251,6 +251,10 @@ class FeatureTransform:
                                 org_features[feature_category].update([k.split('*')[0] for k in ordered_origin_keys.keys()])
 
                             target_start_id = 0
+                            use_sparse_target = any(
+                                'target_start' in origin_info or 'target_end' in origin_info
+                                for origin_info in ordered_origin_keys.values()
+                            )
                             for org_key, info in ordered_origin_keys.items():
                                 org_info = info.copy()
                                 org_key = org_key.split('*')[0]
@@ -273,8 +277,9 @@ class FeatureTransform:
                                             f"target_end={org_info['target_end']}"
                                         )
                                     target_start_id = max(target_start_id, org_info['target_end'])
-                                    info['target_start'] = org_info['target_start']
-                                    info['target_end'] = org_info['target_end']
+                                    if use_sparse_target:
+                                        info['target_start'] = org_info['target_start']
+                                        info['target_end'] = org_info['target_end']
                                 else:
                                     org_info['target_key'] = target_feature
                                 reverse_convert_features[org_key].append(org_info)
