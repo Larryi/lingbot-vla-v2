@@ -273,7 +273,19 @@ class LingbotVLAv2Server:
         print(f"loading model from: {path_to_pi_model}")
         
         # load training config
-        training_config_path = Path(path_to_pi_model).parent.parent.parent/'lingbotvla_cli.yaml'
+        model_path = Path(path_to_pi_model).expanduser().resolve()
+        training_config_path = next(
+            (
+                candidate / "lingbotvla_cli.yaml"
+                for candidate in (model_path, *model_path.parents[:4])
+                if (candidate / "lingbotvla_cli.yaml").is_file()
+            ),
+            None,
+        )
+        if training_config_path is None:
+            raise FileNotFoundError(
+                f"lingbotvla_cli.yaml not found in checkpoint bundle or its parents: {model_path}"
+            )
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
         f.close()
