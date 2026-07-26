@@ -27,6 +27,8 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, is
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.processing_utils import Unpack
 
+logger = logging.get_logger(__name__)
+
 try:
     from dinov3.hub.backbones import (
         dinov3_vits16,
