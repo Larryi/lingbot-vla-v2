@@ -192,6 +192,10 @@ PY
 python -m pip uninstall -y opencv-python || true
 python -m pip install --force-reinstall --no-deps opencv-python-headless==4.11.0.86
 python -m pip install numpy==1.26.4 huggingface_hub==0.34.3
+# requirements.txt pins packaging 25 while a newly created Conda environment
+# may contain packaging 26. Let Conda own the pinned files so conda-pack does
+# not detect a pip-overwritten Conda package.
+conda install packaging=25.0 -y
 if ! python -m pip check; then
   echo "[WARN] pip check reported dependency metadata issues." >&2
   echo "[WARN] lerobot and depth subpackages are installed with --no-deps intentionally to preserve training pins." >&2
