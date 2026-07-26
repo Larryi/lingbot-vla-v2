@@ -1,10 +1,12 @@
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Literal
 from collections import defaultdict
 import numpy as np
@@ -117,6 +119,10 @@ def get_moe_param_groups(model: "torch.nn.Module", args_train) -> Optional[List[
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
+    keep_last_checkpoints: int = field(
+        default=1,
+        metadata={"help": "Number of complete DCP checkpoints to retain."},
+    )
     freeze_vit: bool = field(
         default=False,
         metadata={"help": "Whether or not to freeze the vit parameters."},
@@ -327,6 +333,39 @@ class Arguments:
     data: "MyDataArguments" = field(default_factory=MyDataArguments)
     train: "MyTrainingArguments" = field(default_factory=MyTrainingArguments)
     eval: "EvalArguments" = field(default_factory=EvalArguments)
+
+
+def _checkpoint_step(path):
+    match = re.fullmatch(r"global_step_(\d+)", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _checkpoint_is_complete(path, world_size):
+    return (
+        (path / "model" / ".metadata").is_file()
+        and (path / "optimizer" / ".metadata").is_file()
+        and all(
+            (path / "extra_state" / f"extra_state_rank_{rank}.pt").is_file()
+            for rank in range(world_size)
+        )
+    )
+
+
+def _prune_old_checkpoints(checkpoint_root, keep, world_size):
+    if keep <= 0:
+        return
+    root = Path(checkpoint_root)
+    complete = sorted(
+        (
+            path
+            for path in root.glob("global_step_*")
+            if _checkpoint_is_complete(path, world_size)
+        ),
+        key=_checkpoint_step,
+    )
+    for stale in complete[:-keep]:
+        shutil.rmtree(stale)
+        logger.info_rank0(f"Removed stale checkpoint after successful replacement: {stale}")
 
 
 def main():
@@ -1130,6 +1169,14 @@ def main():
                     current_epoch_for_eval,
                     current_epoch_step_for_eval,
                 )
+                if not args.train.async_save_hf_weights:
+                    if args.train.global_rank == 0:
+                        _prune_old_checkpoints(
+                            args.train.save_checkpoint_path,
+                            args.train.keep_last_checkpoints,
+                            args.train.world_size,
+                        )
+                    dist.barrier()
 
             if args.train.max_steps is not None and global_step >= args.train.max_steps:
                 logger.info_rank0(f"Reached max_steps={args.train.max_steps}, stopping training.")
@@ -1169,6 +1216,14 @@ def main():
                     current_epoch_for_eval,
                     current_epoch_step_for_eval,
                 )
+                if not args.train.async_save_hf_weights:
+                    if args.train.global_rank == 0:
+                        _prune_old_checkpoints(
+                            args.train.save_checkpoint_path,
+                            args.train.keep_last_checkpoints,
+                            args.train.world_size,
+                        )
+                    dist.barrier()
             break
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
@@ -1195,6 +1250,14 @@ def main():
                 current_epoch_for_eval,
                 current_epoch_step_for_eval,
             )
+            if not args.train.async_save_hf_weights:
+                if args.train.global_rank == 0:
+                    _prune_old_checkpoints(
+                        args.train.save_checkpoint_path,
+                        args.train.keep_last_checkpoints,
+                        args.train.world_size,
+                    )
+                dist.barrier()
 
     if max_steps_driven:
         data_loader_tqdm.close()
@@ -1214,6 +1277,12 @@ def main():
             current_epoch_step_for_eval,
         )
     hf_saver.wait_all_across_ranks()
+    if args.train.global_rank == 0:
+        _prune_old_checkpoints(
+            args.train.save_checkpoint_path,
+            args.train.keep_last_checkpoints,
+            args.train.world_size,
+        )
 
     dist.barrier()
     dist.destroy_process_group()
