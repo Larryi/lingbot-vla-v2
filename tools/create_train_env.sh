@@ -158,20 +158,13 @@ assert_torch_stack
 python -m pip install -r "${REPO_ROOT}/requirements.txt"
 python -m pip install numpydantic==1.9.0 --no-deps
 assert_torch_stack
-# Follow the open-source lingbot-vla layout, but do not let local depth
-# packages resolve their own broad dependencies. MoGe's pyproject allows
-# unpinned huggingface_hub/numpy/opencv/gradio, which breaks the training pins.
-# Its optional train/test dataloader imports `pipeline`, but LingBot training
-# only needs the MoGe model code, so skip that PyPI-only dependency here.
-python - <<PY
-import site
-from pathlib import Path
-
-site_packages = Path(site.getsitepackages()[0])
-pth = site_packages / "stablevla_local_depth.pth"
-pth.write_text("${REPO_ROOT}/lingbotvla/models/vla/vision_models/morgbd_clean/3rd/utils3d\n")
-print("wrote", pth)
-PY
+# MoGe requires EasternJournalist/utils3d at this exact commit. The unrelated
+# PyPI package named utils3d depends on obsolete Open3D wheels and must not be
+# selected. Install the pinned upstream implementation without re-resolving the
+# already-fixed depth dependency stack.
+python -m pip uninstall -y utils3d || true
+python -m pip install --no-deps \
+  "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183"
 python -m pip install -e "${REPO_ROOT}/lingbotvla/models/vla/vision_models/lingbot-depth" --no-deps
 python -m pip install -e "${REPO_ROOT}/lingbotvla/models/vla/vision_models/MoGe" --no-deps
 assert_torch_stack
@@ -184,7 +177,9 @@ import trimesh
 import moge
 import mdm
 import utils3d
+from importlib.metadata import version
 
+assert version("utils3d") == "1.3"
 print("depth imports ok")
 PY
 # MoGe and the depth packages intentionally skip their broad dependency
