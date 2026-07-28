@@ -368,6 +368,53 @@ def _prune_old_checkpoints(checkpoint_root, keep, world_size):
         logger.info_rank0(f"Removed stale checkpoint after successful replacement: {stale}")
 
 
+def _drop_recreatable_hf_exports(checkpoint_root, world_size):
+    """Free HF exports while retaining the complete DCP needed for recovery."""
+    root = Path(checkpoint_root)
+    for checkpoint in root.glob("global_step_*"):
+        if not _checkpoint_is_complete(checkpoint, world_size):
+            continue
+        for export in (
+            checkpoint / "hf_ckpt",
+            checkpoint / "ema_hf_ckpt",
+            *checkpoint.glob(".hf_ckpt.tmp.*"),
+            *checkpoint.glob(".ema_hf_ckpt.tmp.*"),
+        ):
+            if export.is_dir():
+                shutil.rmtree(export)
+                logger.info_rank0(
+                    f"Removed recreatable HF export before next DCP save: {export}"
+                )
+
+
+def _ensure_checkpoint_headroom(checkpoint_root, world_size):
+    """Refuse a save before writing when another complete DCP cannot fit."""
+    root = Path(checkpoint_root)
+    complete = [
+        path
+        for path in root.glob("global_step_*")
+        if _checkpoint_is_complete(path, world_size)
+    ]
+    if not complete:
+        return
+    baseline = max(
+        sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+        for path in complete
+    )
+    free = shutil.disk_usage(root).free
+    required = baseline + max(baseline // 10, 2 * 1024**3)
+    if free < required:
+        raise RuntimeError(
+            "Insufficient disk headroom for an atomic checkpoint replacement: "
+            f"free={free / 1024**3:.1f} GiB, required={required / 1024**3:.1f} GiB. "
+            "The previous complete DCP was retained; free disk space and resume."
+        )
+    logger.info_rank0(
+        "Checkpoint disk preflight passed: "
+        f"free={free / 1024**3:.1f} GiB, required={required / 1024**3:.1f} GiB"
+    )
+
+
 def main():
     args = parse_args(Arguments)
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
@@ -1159,16 +1206,19 @@ def main():
                 }
                 if args.train.global_rank == 0:
                     writer.flush()
+                    if not args.train.async_save_hf_weights:
+                        _drop_recreatable_hf_exports(
+                            args.train.save_checkpoint_path,
+                            args.train.world_size,
+                        )
+                dist.barrier()
+                _ensure_checkpoint_headroom(
+                    args.train.save_checkpoint_path,
+                    args.train.world_size,
+                )
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
-                save_hf_checkpoint_best_effort(
-                    save_checkpoint_path,
-                    state,
-                    global_step,
-                    current_epoch_for_eval,
-                    current_epoch_step_for_eval,
-                )
                 if not args.train.async_save_hf_weights:
                     if args.train.global_rank == 0:
                         _prune_old_checkpoints(
@@ -1177,6 +1227,13 @@ def main():
                             args.train.world_size,
                         )
                     dist.barrier()
+                save_hf_checkpoint_best_effort(
+                    save_checkpoint_path,
+                    state,
+                    global_step,
+                    current_epoch_for_eval,
+                    current_epoch_step_for_eval,
+                )
 
             if args.train.max_steps is not None and global_step >= args.train.max_steps:
                 logger.info_rank0(f"Reached max_steps={args.train.max_steps}, stopping training.")
@@ -1206,16 +1263,19 @@ def main():
                         "torch_rng_state": torch.get_rng_state(),
                     },
                 }
+                if args.train.global_rank == 0 and not args.train.async_save_hf_weights:
+                    _drop_recreatable_hf_exports(
+                        args.train.save_checkpoint_path,
+                        args.train.world_size,
+                    )
+                dist.barrier()
+                _ensure_checkpoint_headroom(
+                    args.train.save_checkpoint_path,
+                    args.train.world_size,
+                )
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
-                save_hf_checkpoint_best_effort(
-                    save_checkpoint_path,
-                    state,
-                    global_step,
-                    current_epoch_for_eval,
-                    current_epoch_step_for_eval,
-                )
                 if not args.train.async_save_hf_weights:
                     if args.train.global_rank == 0:
                         _prune_old_checkpoints(
@@ -1224,6 +1284,13 @@ def main():
                             args.train.world_size,
                         )
                     dist.barrier()
+                save_hf_checkpoint_best_effort(
+                    save_checkpoint_path,
+                    state,
+                    global_step,
+                    current_epoch_for_eval,
+                    current_epoch_step_for_eval,
+                )
             break
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
@@ -1240,16 +1307,19 @@ def main():
                     "torch_rng_state": torch.get_rng_state(),
                 },
             }
+            if args.train.global_rank == 0 and not args.train.async_save_hf_weights:
+                _drop_recreatable_hf_exports(
+                    args.train.save_checkpoint_path,
+                    args.train.world_size,
+                )
+            dist.barrier()
+            _ensure_checkpoint_headroom(
+                args.train.save_checkpoint_path,
+                args.train.world_size,
+            )
             Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
-            save_hf_checkpoint_best_effort(
-                save_checkpoint_path,
-                state,
-                global_step,
-                current_epoch_for_eval,
-                current_epoch_step_for_eval,
-            )
             if not args.train.async_save_hf_weights:
                 if args.train.global_rank == 0:
                     _prune_old_checkpoints(
@@ -1258,6 +1328,13 @@ def main():
                         args.train.world_size,
                     )
                 dist.barrier()
+            save_hf_checkpoint_best_effort(
+                save_checkpoint_path,
+                state,
+                global_step,
+                current_epoch_for_eval,
+                current_epoch_step_for_eval,
+            )
 
     if max_steps_driven:
         data_loader_tqdm.close()
