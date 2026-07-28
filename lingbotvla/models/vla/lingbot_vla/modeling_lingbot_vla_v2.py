@@ -1288,18 +1288,54 @@ class LingbotVlaV2Policy(PreTrainedModel):
         )
 
         if joint_mask is not None:
-            if "repeat" in self.config.loss_type:
+            repeat_loss = "repeat" in self.config.loss_type
+            if repeat_loss:
                 joint_mask = joint_mask.repeat(2, 1, 1)
-            assert len(joint_mask.shape) == 3
-            
-            masked_losses = losses * joint_mask
-            valid_counts = joint_mask.sum(dim=(1, 2)).clamp(min=1)
+                if action_is_pad is not None:
+                    action_is_pad = action_is_pad.repeat(2, 1)
+            if joint_mask.ndim != 3:
+                raise ValueError(
+                    f"joint_mask must have shape (B, T, D), got {joint_mask.shape}"
+                )
+
+            loss_mask = joint_mask.bool()
+            if action_is_pad is not None:
+                if action_is_pad.ndim != 2:
+                    raise ValueError(
+                        "action_is_pad must have shape (B, T), "
+                        f"got {action_is_pad.shape}"
+                    )
+                if action_is_pad.shape != losses.shape[:2]:
+                    raise ValueError(
+                        "action_is_pad shape must match loss batch/time dimensions: "
+                        f"mask={action_is_pad.shape}, losses={losses.shape}"
+                    )
+                loss_mask = loss_mask & ~action_is_pad.bool().unsqueeze(-1)
+
+            masked_losses = losses * loss_mask.to(dtype=losses.dtype)
+            valid_counts = loss_mask.sum(dim=(1, 2)).clamp(min=1)
             batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
-            loss_vla = masked_losses.sum() / joint_mask.sum().clamp(min=1)
+            loss_vla = masked_losses.sum() / loss_mask.sum().clamp(min=1)
         else:
             losses = losses[:, :, : self.config.action_dim]
-            batch_mean_losses = losses.mean(dim=(1, 2))
-            loss_vla = losses.mean()
+            if action_is_pad is not None:
+                if "repeat" in self.config.loss_type:
+                    action_is_pad = action_is_pad.repeat(2, 1)
+                if action_is_pad.shape != losses.shape[:2]:
+                    raise ValueError(
+                        "action_is_pad shape must match loss batch/time dimensions: "
+                        f"mask={action_is_pad.shape}, losses={losses.shape}"
+                    )
+                loss_mask = ~action_is_pad.bool().unsqueeze(-1)
+                masked_losses = losses * loss_mask.to(dtype=losses.dtype)
+                valid_counts = (
+                    loss_mask.sum(dim=(1, 2)) * losses.shape[-1]
+                ).clamp(min=1)
+                batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
+                loss_vla = masked_losses.sum() / valid_counts.sum().clamp(min=1)
+            else:
+                batch_mean_losses = losses.mean(dim=(1, 2))
+                loss_vla = losses.mean()
 
         loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
         total_loss = (
